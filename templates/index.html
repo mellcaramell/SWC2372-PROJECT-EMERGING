@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meeting App with WebRTC</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <h1>Welcome to the WebRTC Meeting App</h1>
+        <nav id="navbar" style="display: none;">
+            <ul>
+                <li><button id="create-room-button">Create a Room</button></li>
+                <li><button id="join-room-button">Join an Existing Meeting</button></li>
+                <li><button id="logout-button">Logout</button></li>
+            </ul>
+        </nav>
+    </header>
+
+    <div id="auth-section">
+        <!-- Login Form -->
+        <div id="login-form">
+            <h2>Login</h2>
+            <input type="text" id="login-username" placeholder="Username">
+            <input type="password" id="login-password" placeholder="Password">
+            <button id="login-button">Login</button>
+            <p>Don't have an account? <a href="#" id="show-register">Register here</a></p>
+        </div>
+    
+        <!-- Registration Form -->
+        <div id="register-form" style="display: none;">
+            <h2>Register</h2>
+            <input type="text" id="register-username" placeholder="Username">
+            <input type="email" id="register-email" placeholder="Email">
+            <input type="password" id="register-password" placeholder="Password">
+            <input type="password" id="register-confirm-password" placeholder="Confirm Password">
+            <button id="register-button">Register</button>
+            <p>Already have an account? <a href="#" id="show-login">Login here</a></p>
+        </div>
+    </div>    
+
+    <main id="main-app" style="display:none;">
+        <div id="container">
+            <div id="room-name-container" style="display: none; margin-top: 20px;">
+                <input type="text" id="room-name" placeholder="Enter room name">
+                <button id="join-button" style="display: none;">Join Meeting</button>
+                <button id="create-button" style="display: none;">Create Meeting</button>
+                <button id="cancel-button">Cancel</button>
+            </div>
+    
+            <div id="main-content" style="display: flex; justify-content: space-between;">
+                <!-- Video and Meeting Room -->
+                <div id="video-container" style="flex: 2; display: none; max-width: 60%; margin-right: 20px;">
+                    <div style="position: relative; max-width: 100%;">
+                        <video id="local-video" autoplay muted></video> <!-- Video utama (kamera) -->
+                        <div class="video-name-overlay" id="local-name"></div>
+                    </div>
+                    <div id="remote-videos"></div>
+                
+                    <!-- Shared screen container (covers the full screen) -->
+                    <div id="shared-screen-wrapper" style="display:none;">
+                        <video id="shared-screen" autoplay muted></video> <!-- Video for screen share -->
+                    </div>
+
+                    <!-- Local camera container in a small window -->
+                    <div id="local-video-container" style="display:none;">
+                        <video id="local-video" autoplay muted></video> <!-- Local camera feed -->
+                    </div>
+                </div>            
+    
+                <!-- Chat Section -->
+                <div id="chat-container" style="flex: 1; display:none; max-width: 35%;">
+                    <div id="chat-messages" style="height: 300px; overflow-y: auto; border: 1px solid #ddd; padding: 10px;">
+                        <!-- Pesan akan ditampilkan di sini -->
+                    </div>
+                    <input type="text" id="chat-input" placeholder="Type a message..." style="width: 100%; padding: 10px; margin-top: 10px;">
+                    <button id="send-chat-button" style="width: 100%; padding: 10px; margin-top: 10px;">Send</button>
+                </div>
+            </div>
+    
+            <div id="leave-container" style="display:none; margin-top: 20px;">
+                <button id="leave-button"><i class="fa fa-sign-out"></i> Leave Meeting</button>
+            </div>
+    
+            <!-- Mute and Video Toggle Buttons -->
+            <div id="controls-container" style="display:none; margin-top: 20px;">
+                <button id="mute-button"><i class="fa fa-microphone-slash"></i></button>
+                <button id="video-button"><i class="fa fa-video-slash"></i></button>
+                <button id="share-screen-button"><i class="fa fa-share-square"></i></button>
+                <button id="share-meeting-button"><i class="fa fa-link"></i></button>
+            </div>
+
+            <!-- Participant List Section (Initially Hidden) -->
+            <div id="participants-container" style="display: none;">
+                <h3>Participants</h3>
+                <ul id="participant-list">
+                    <!-- Participants will be listed here -->
+                </ul>
+            </div>            
+
+        </div>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 WebRTC Meeting App. All rights reserved.</p>
+    </footer>
+
+    <div id="notification" class="notification"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
+
+    <script>
+        // Establish socket connection
+        const socket = io.connect('http://' + document.domain + ':' + location.port);
+
+        let localStream;
+        let peerConnection;
+        const servers = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        let roomName = "";
+        let isMuted = false;
+        let isVideoOff = false;
+        let isScreenSharing = false;
+        let screenStream;
+        let username = "";
+
+        // Display notification
+        function showNotification(message) {
+            const notification = $('#notification');
+            notification.text(message).fadeIn().delay(3000).fadeOut();
+        }
+
+        // Elements
+        const loginForm = document.getElementById('login-form');
+        const registerForm = document.getElementById('register-form');
+        const showRegister = document.getElementById('show-register');
+        const showLogin = document.getElementById('show-login');
+
+        // Show the registration form
+        showRegister.addEventListener('click', (event) => {
+            event.preventDefault(); // Prevent default link behavior
+            loginForm.style.display = 'none';
+            registerForm.style.display = 'block';
+        });
+
+        // Show the login form
+        showLogin.addEventListener('click', (event) => {
+            event.preventDefault(); // Prevent default link behavior
+            registerForm.style.display = 'none';
+            loginForm.style.display = 'block';
+        });
+
+        // Handle login form submission
+        $('#login-button').on('click', function () {
+            username = $('#login-username').val(); // Set the username
+            const password = $('#login-password').val();
+            
+            if (username && password) {
+                showNotification("Login successful!");
+                $('#auth-section').hide();  // Hide the login form after successful login
+                $('#main-app').show();
+                $('#navbar').show();
+                $('#logout-button').show(); // Show the logout button after login
+                setupLocalStream();
+            } else {
+                showNotification("Please enter both username and password.");
+            }
+        });
+
+        // Handle logout
+        $('#logout-button').on('click', function() {
+            socket.emit('leave', roomName);
+            localStream.getTracks().forEach(track => track.stop());
+            $('#remote-videos').empty();
+            $('#video-container').hide();
+            $('#leave-container').hide();
+            $('#controls-container').hide();
+            $('#chat-container').hide();
+            $('#auth-section').show();
+            $('#main-app').hide();
+            $('#navbar').hide();
+            roomName = "";
+            username = "";
+            showNotification("You have logged out.");
+        });
+
+        // Handle Share Meeting Button Click
+        document.getElementById('share-meeting-button').addEventListener('click', function() {
+            // You can replace this URL with your meeting's URL or dynamic link
+            const meetingUrl = window.location.href;  // Get current page URL or a custom meeting link
+            const meetingLink = prompt("Share this link with others to join the meeting:", meetingUrl);
+
+            if (meetingLink) {
+                // You can do something with the link, like copy it to clipboard or log it
+                console.log("Meeting link shared: ", meetingLink);
+            }
+        });
+
+        function showChat() {
+            $('#chat-container').show();
+        }
+
+        function hideChat() {
+            $('#chat-container').hide();
+        }
+
+        $('#send-chat-button').on('click', function() {
+            const message = $('#chat-input').val();
+            if (message) {
+                sendChatMessage(message);
+                $('#chat-input').val('');
+            }
+        });
+
+        function sendChatMessage(message) {
+            socket.emit('chat-message', message);
+            appendMessage('You', message);  
+        }
+
+        function appendMessage(sender, message) {
+            const chatMessages = $('#chat-messages');
+            chatMessages.append(`<div><strong>${sender}:</strong> ${message}</div>`);
+            chatMessages.scrollTop(chatMessages[0].scrollHeight); 
+        }
+
+        function setupLocalStream() {
+            return new Promise((resolve, reject) => {
+                if (!localStream) {
+                    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+                        localStream = stream;
+                        const localVideo = document.getElementById('local-video');
+                        localVideo.srcObject = stream;
+
+                        // Adding overlay with username
+                        const nameOverlay = document.createElement('div');
+                        nameOverlay.textContent = username;
+                        nameOverlay.className = 'video-name-overlay';
+                        localVideo.parentElement.appendChild(nameOverlay);
+
+                        resolve();
+                    }).catch(error => {
+                        showNotification("Error accessing media devices: " + error);
+                        reject(error);
+                    });
+                } else {
+                    resolve();
+                }
+            });
+        }
+
+        function startScreenShare() {
+            navigator.mediaDevices.getDisplayMedia({ video: true }).then(stream => {
+                isScreenSharing = true;
+                screenStream = stream;
+                $('#shared-screen-wrapper').show();
+                const screenVideo = document.getElementById('shared-screen');
+                screenVideo.srcObject = screenStream;
+
+                $('#local-video-wrapper').css({
+                    position: 'absolute',
+                    bottom: '10px',
+                    right: '10px',
+                    width: '150px',
+                    height: 'auto',
+                    zIndex: 1000,
+                });
+
+                // Move the chat container to the bottom of the screen
+                $('#chat-container').addClass('chat-bottom');
+
+                // Change icon when screen sharing starts
+                $('#share-screen-button i').removeClass('fa-share-square').addClass('fa-stop');
+            }).catch(error => {
+                alert("Error sharing screen: " + error);
+            });
+        }
+
+        function stopScreenShare() {
+            const screenTrack = screenStream.getTracks()[0];
+            screenTrack.stop();
+            $('#shared-screen-wrapper').hide();
+            $('#local-video-wrapper').removeAttr('style');
+            isScreenSharing = false;
+
+            // Reset the chat container position
+            $('#chat-container').removeClass('chat-bottom');
+
+            // Change icon when screen sharing stops
+            $('#share-screen-button i').removeClass('fa-stop').addClass('fa-share-square');
+        }
+
+        // Handle creating and joining rooms
+        $('#create-room-button').on('click', function() {
+            $('#room-name-container').show();
+            $('#create-button').show();
+            $('#join-button').show();
+        });
+
+        $('#join-room-button').on('click', function() {
+            $('#room-name-container').show();
+            $('#create-button').hide();
+            $('#join-button').show();
+        });
+
+        $('#create-button').on('click', function() {
+            roomName = $('#room-name').val();
+            if (roomName) {
+                socket.emit('create', roomName);
+                showNotification(`Room ${roomName} created successfully!`);
+                joinRoom(roomName);
+                $('#room-name-container').hide();
+                $('#leave-container').show();
+                $('#controls-container').show();
+                $('#chat-container').show();
+            } else {
+                showNotification("Please enter a room name");
+            }
+        });
+
+        $('#join-button').on('click', function() {
+            roomName = $('#room-name').val();
+            if (roomName) {
+                joinRoom(roomName);
+                showNotification(`Joined room ${roomName} successfully!`);
+                $('#room-name-container').hide();
+                $('#leave-container').show();
+                $('#controls-container').show();
+                $('#chat-container').show();
+            } else {
+                showNotification("Please enter a room name");
+            }
+        });
+
+        function joinMeeting() {
+            // Logika untuk bergabung dengan meeting, misalnya, menghubungkan ke server, mendapatkan stream, dll.
+
+            // Setelah stream lokal siap
+            setupLocalStream();
+
+            // Tampilkan video container setelah semuanya siap
+            document.getElementById('video-container').style.display = 'flex';
+        }
+
+        $('#cancel-button').on('click', function() {
+            $('#room-name-container').hide();
+        });
+
+        $('#leave-button').on('click', function () {
+    socket.emit('leave', { username: username, room: roomName }); // Include username in the payload
+    removeParticipant(username);; // Remove local user from participant list
+            localStream.getTracks().forEach(track => track.stop());
+            $('#remote-videos').empty();
+            $('#video-container').hide();
+            $('#leave-container').hide();
+            $('#controls-container').hide();
+            $('#chat-container').hide();
+            $('#room-name-container').show();
+            $('#create-button').hide();
+            $('#join-button').show();
+            $('#navbar').show();
+            $('#main-app').show();
+            roomName = "";
+
+            // Sembunyikan senarai peserta jika tiada pengguna
+            if (participants.length === 0) {
+                $('#participants-container').hide();
+            }
+
+    showNotification("You have left the meeting.");
+});
+
+        // Video mute toggle
+        $('#mute-button').on('click', function() {
+            isMuted = !isMuted;
+            localStream.getAudioTracks()[0].enabled = !isMuted;
+            $(this).html(isMuted ? '<i class="fa fa-microphone-slash"></i>' : '<i class="fa fa-microphone"></i>');
+        });
+
+        // Video toggle
+        $('#video-button').on('click', function() {
+            isVideoOff = !isVideoOff;
+            localStream.getVideoTracks()[0].enabled = !isVideoOff;
+            $(this).html(isVideoOff ? '<i class="fa fa-video-slash"></i>' : '<i class="fa fa-video"></i>');
+        });
+
+        // Share screen toggle
+        $('#share-screen-button').on('click', function() {
+            if (!isScreenSharing) {
+                navigator.mediaDevices.getDisplayMedia({ video: true }).then(stream => {
+                    isScreenSharing = true;
+                    screenStream = stream;
+                    const sharedScreenVideo = document.getElementById('shared-screen');
+                    sharedScreenVideo.srcObject = stream;
+                    $('#shared-screen-wrapper').show();
+                    localStream.getTracks().forEach(track => track.stop()); // Stop the local video track
+                    localStream = screenStream;
+                }).catch(err => {
+                    showNotification("Error sharing screen: " + err);
+                });
+            } else {
+                screenStream.getTracks().forEach(track => track.stop());
+                $('#shared-screen-wrapper').hide();
+                isScreenSharing = false;
+                setupLocalStream();  // Reinitialize local video
+            }
+        });
+
+        let participants = [];  // Store participants
+
+        // Update the participant list in the UI
+        function updateParticipants() {
+            const participantList = document.getElementById('participant-list');
+            participantList.innerHTML = '';  // Clear current list
+
+            // Add participants to the list
+            participants.forEach(participant => {
+            const listItem = document.createElement('li');
+            
+            // Create the participant name display
+            listItem.innerHTML = `<span class="participant-name">${participant.username}</span>`;
+            
+            // Create the mute/unmute button
+            const muteButton = document.createElement('button');
+            muteButton.textContent = "🔇"; // Icon for mute
+            muteButton.className = "mute-btn";
+            muteButton.addEventListener('click', () => {
+                // Handle mute/unmute logic here
+                const isMuted = muteButton.textContent === "🔇";
+                muteButton.textContent = isMuted ? "🔊" : "🔇"; // Toggle icon
+                // Send mute/unmute event to the server if needed
+                console.log(`${participant.username} is ${isMuted ? 'unmuted' : 'muted'}`);
+            });
+
+            // Create the leave call button
+            const leaveButton = document.createElement('button');
+            leaveButton.textContent = "🚪"; // Icon for leave
+            leaveButton.className = "leave-btn";
+            leaveButton.addEventListener('click', () => {
+                // Handle leave logic here
+                console.log(`${participant.username} has left the call.`);
+                listItem.remove(); // Remove the participant from the list
+                // Optionally, emit a leave event to the server
+            });
+
+            // Append buttons to the list item
+            listItem.appendChild(muteButton);
+            listItem.appendChild(leaveButton);
+
+            // Add the list item to the participant list
+            participantList.appendChild(listItem);
+        });
+
+            // Hide participants container if no participants remain
+            if (participants.length === 0) {
+                document.getElementById('participants-container').style.display = 'none';
+            } else {
+                document.getElementById('participants-container').style.display = 'block';
+            }
+        }
+
+// Add a new participant
+function addParticipant(username) {
+    if (!participants.some(participant => participant.username === username)) {
+        participants.push({ username: username });
+        updateParticipants();
+    }
+}
+// Remove a participant
+function removeParticipant(username) {
+    const index = participants.findIndex(participant => participant.username === username);
+    if (index !== -1) {
+        participants.splice(index, 1);
+        updateParticipants();
+    }
+}
+
+socket.on('user_joined', (newUser) => {
+    addParticipant(newUser);
+});
+
+socket.on('leave', ({ username, room }) => {
+    socket.leave(room);
+    io.to(room).emit('user_left', { username });
+});
+   
+
+socket.on('user_left', (leftUser) => {
+    removeParticipant(leftUser.username);
+
+    if (participants.length === 0) {
+        document.getElementById('participants-container').style.display = 'none';
+    }
+
+    showNotification(`${leftUser.username} has left the meeting.`);
+});
+
+// Function to handle joining the meeting
+function joinMeeting(participantName) {
+    // Add participant to the list
+    addParticipant(participantName);
+
+    // Show the participant list container
+    document.getElementById('participants-container').style.display = 'block';
+}
+
+// Function to handle leaving the meeting
+function leaveMeeting(button) {
+    const participantItem = button.parentElement;
+    const participantName = participantItem.querySelector('.participant-name').textContent;
+
+    socket.emit('leave', { username: participantName, room: roomName }); // Pass username and room name
+    removeParticipant(participantName); // Remove the participant locally
+}
+
+function joinRoom(room) {
+    socket.emit('join', room, username); // Pass username to the server
+    addParticipant(username); // Add local user to participant list
+
+    $('#participants-container').show(); // Show the participant list
+    setupLocalStream().then(() => {
+        $('#video-container').show(); // Show video container
+    });
+}
+</script>
+</body>
+</html>
